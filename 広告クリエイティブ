@@ -1,0 +1,410 @@
+import io
+import os
+import zipfile
+import textwrap
+from datetime import datetime
+
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+st.set_page_config(page_title="EC画像ジェネレーター（デモ）", layout="wide")
+
+# ===== Font helpers =====
+# Streamlit Cloud上は日本語フォントが無いことが多いので、任意で fonts/ に置けるようにする
+FONT_REG_CANDIDATES = [
+    "fonts/NotoSansCJKjp-Regular.otf",
+    "fonts/NotoSansCJK-Regular.ttc",
+    "fonts/IPAexGothic.ttf",
+    "fonts/ipag.ttf",
+]
+FONT_BOLD_CANDIDATES = [
+    "fonts/NotoSansCJKjp-Bold.otf",
+    "fonts/NotoSansCJK-Bold.ttc",
+    "fonts/IPAexGothic.ttf",
+    "fonts/ipag.ttf",
+]
+
+def load_font(size: int, bold: bool = False):
+    candidates = FONT_BOLD_CANDIDATES if bold else FONT_REG_CANDIDATES
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+    # fallback (日本語が豆腐になる可能性あり)
+    return ImageFont.load_default()
+
+# ===== Image helpers =====
+def fit_square(img: Image.Image, size=1080, mode="center_crop") -> Image.Image:
+    img = img.convert("RGB")
+    w, h = img.size
+    if w == h:
+        sq = img
+    else:
+        if mode == "blur_pad":
+            scale = size / max(w, h)
+            fg = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            bg = img.resize((size, size), Image.LANCZOS).filter(ImageFilter.GaussianBlur(25))
+            x = (size - fg.size[0]) // 2
+            y = (size - fg.size[1]) // 2
+            bg.paste(fg, (x, y))
+            sq = bg
+        else:
+            side = min(w, h)
+            left = (w - side) // 2
+            top = (h - side) // 2
+            sq = img.crop((left, top, left + side, top + side))
+    return sq.resize((size, size), Image.LANCZOS)
+
+def draw_text(draw: ImageDraw.ImageDraw, xy, text, font, fill=(255,255,255), stroke_fill=(0,0,0), stroke_width=6, anchor=None):
+    draw.text(xy, text, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill, anchor=anchor)
+
+def add_bottom_band(img: Image.Image, lines, band_h=220, padding=60, opacity=200) -> Image.Image:
+    out = img.convert("RGBA")
+    w, h = out.size
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rectangle([0, h - band_h, w, h], fill=(0, 0, 0, opacity))
+    out = Image.alpha_composite(out, overlay)
+    draw = ImageDraw.Draw(out)
+
+    f1 = load_font(68, bold=True)
+    f2 = load_font(42, bold=False)
+
+    y = h - band_h + 40
+    for i, t in enumerate(lines):
+        font = f1 if i == 0 else f2
+        draw_text(draw, (padding, y), t, font, stroke_width=4)
+        y += (68 if i == 0 else 42) + 12
+    return out.convert("RGB")
+
+def add_badge(img: Image.Image, text="旬", pos="top_right") -> Image.Image:
+    out = img.convert("RGBA")
+    w, h = out.size
+    badge_w, badge_h = 300, 120
+    x = w - badge_w - 50 if pos == "top_right" else 50
+    y = 50
+
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rounded_rectangle([x, y, x + badge_w, y + badge_h], radius=28, fill=(255, 255, 255, 210))
+    out = Image.alpha_composite(out, overlay)
+
+    draw = ImageDraw.Draw(out)
+    font = load_font(52, bold=True)
+    draw.text((x + badge_w // 2, y + badge_h // 2), text, font=font, fill=(0, 0, 0, 255), anchor="mm")
+    return out.convert("RGB")
+
+def add_pointer_sfx(img: Image.Image, sfx1="プチっ！", sfx2="じゅわっ！", target=(720, 470)) -> Image.Image:
+    out = img.convert("RGBA")
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.line([(190, 360), target], fill=(255, 255, 255, 230), width=8)
+    od.line([(840, 170), (target[0] + 10, target[1] - 10)], fill=(255, 255, 255, 230), width=8)
+    out = Image.alpha_composite(out, overlay)
+
+    draw = ImageDraw.Draw(out)
+    font1 = load_font(86, bold=True)
+    font2 = load_font(72, bold=True)
+    draw_text(draw, (170, 310), sfx1, font1, stroke_width=6)
+    draw_text(draw, (280, 420), sfx2, font2, stroke_width=6)
+    return out.convert("RGB")
+
+def add_three_points(img: Image.Image, points) -> Image.Image:
+    out = img.convert("RGBA")
+    w, h = out.size
+    panel_w = 420
+
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rounded_rectangle([w - panel_w - 40, 220, w - 40, 740], radius=26, fill=(0, 0, 0, 160))
+    out = Image.alpha_composite(out, overlay)
+
+    draw = ImageDraw.Draw(out)
+    title_font = load_font(46, bold=True)
+    body_font = load_font(40, bold=False)
+
+    draw_text(draw, (w - panel_w, 250), "おすすめポイント", title_font, stroke_width=4)
+
+    y = 330
+    for p in points[:3]:
+        wrapped = textwrap.fill(p, width=12)
+        draw_text(draw, (w - panel_w, y), "・" + wrapped, body_font, stroke_width=3)
+        y += 150
+
+    return out.convert("RGB")
+
+def add_inset(img: Image.Image, inset_img: Image.Image, label="箱イメージ") -> Image.Image:
+    out = img.convert("RGBA")
+    w, h = out.size
+    inset = fit_square(inset_img, 380, mode="center_crop").convert("RGBA")
+
+    border = Image.new("RGBA", (inset.size[0] + 16, inset.size[1] + 16), (255, 255, 255, 220))
+    border.paste(inset, (8, 8))
+    x, y = 60, h - 420
+    out.paste(border, (x, y), border)
+
+    draw = ImageDraw.Draw(out)
+    font = load_font(40, bold=True)
+    draw_text(draw, (x + 10, y - 50), label, font, stroke_width=4)
+    return out.convert("RGB")
+
+# ===== Copy generator (デモはルールベース。後でLLM/Difyに差し替え想定) =====
+def generate_copy(info: dict) -> dict:
+    origin = info["origin"].strip()
+    product = info["product"].strip()
+    category = info["category"]
+    variety = info.get("variety", "").strip()
+    producer = info["producer"].strip()
+    amount = info["amount"].strip()
+    price = info["price"].strip()
+    tags = [t for t in info.get("tags", []) if t]
+
+    # やさしめトーン：断定を避ける
+    base_title = f"【{origin}】{product}"
+    if variety:
+        base_title += f"（{variety}）"
+    title = f"{base_title}｜やさしい味わいを食卓へ"
+
+    # キャッチ（カテゴリで軽く分岐）
+    if category == "水産":
+        catch = ["ぷりっと食感、", "素材の味を楽しむ。"]
+    elif category == "加工品":
+        catch = ["からだにやさしく、", "毎日のひとくちに。"]
+    else:
+        catch = ["みずみずしく、", "やさしいおいしさ。"]
+
+    # おすすめポイント：タグ＋任意入力から生成
+    pts = info.get("points", [])
+    pts = [p.strip() for p in pts if p.strip()]
+    while len(pts) < 3:
+        # タグを自然文にする（簡易）
+        if tags:
+            t = tags[len(pts) % len(tags)]
+            mapping = {
+                "旬": "今の季節にうれしい味わい",
+                "朝採れ": "採れたてを丁寧にお届け",
+                "無添加": "余計なものは入れずに仕上げました",
+                "冷凍": "使いたい分だけ使いやすい",
+                "ギフト": "贈りものにも選びやすい",
+                "訳あり": "味はそのまま、お得に楽しめます",
+                "下処理済み": "手間なく調理しやすい",
+            }
+            pts.append(mapping.get(t, f"「{t}」がうれしい一品"))
+        else:
+            pts.append("毎日の食卓で使いやすい")
+    pts = pts[:3]
+
+    desc = (
+        f"{origin}で大切に育てた「{product}」です。"
+        "届いたその日から、自然な味わいを楽しめるように丁寧に選んでお送りします。"
+    )
+    if tags:
+        desc += f"（特徴：{ ' / '.join(tags[:5]) }）"
+    desc += f"\n\n生産者：{producer}\n内容量：{amount}\n価格：{price}"
+
+    notes = [
+        "【保存】直射日光を避け、涼しい場所（冷蔵/冷凍は商品に合わせて）",
+        "【注意】サイズや形にばらつきがある場合があります。到着後はお早めにお召し上がりください。",
+    ]
+
+    keywords = [product, origin, category, "産直", "お取り寄せ", "ギフト"]
+    if variety:
+        keywords.append(variety)
+    keywords += tags[:5]
+    keywords = list(dict.fromkeys([k for k in keywords if k]))  # unique
+
+    return {
+        "title": title,
+        "catch": " / ".join(catch),
+        "points": pts,
+        "desc": desc,
+        "notes": "\n".join(notes),
+        "keywords": ", ".join(keywords[:12]),
+    }
+
+# ===== UI =====
+st.title("EC販売用 画像デザイン + 出品文 生成（デモ）")
+st.caption("画像アップ→1080正方形→テンプレ合成→文章生成→ダウンロード（※文章はデモ用ルール生成）")
+
+# Font warning
+if isinstance(load_font(20, False), ImageFont.ImageFont):
+    st.info("日本語フォントは任意です。文字が□になる場合は fonts/ に日本語フォントを置いてください（例：NotoSansCJKjp-Regular.otf）。")
+
+col_l, col_r = st.columns([1, 1])
+
+with col_l:
+    st.subheader("① 商品情報（入力）")
+    product = st.text_input("商品名", value="紅八朔")
+    category = st.selectbox("カテゴリ", ["野菜", "果物", "加工品", "水産"], index=1)
+    variety = st.text_input("品種（任意）", value="紅八朔")
+    origin = st.text_input("産地（都道府県＋市町）", value="広島県 大崎上島")
+    producer = st.text_input("生産者名", value="（生産者名）")
+    amount = st.text_input("内容量", value="（例：3kg / 10玉 / 200g×2）")
+    price = st.text_input("価格（税込）", value="（例：2,980円）")
+
+    tags = st.multiselect(
+        "特徴タグ（最大5つ）",
+        ["旬", "朝採れ", "無添加", "冷凍", "ギフト", "訳あり", "下処理済み", "希少", "産地直送"],
+        default=["旬"],
+        max_selections=5,
+    )
+
+    st.subheader("② 画像の作り方")
+    crop_mode = st.radio("正方形化の方法", ["center_crop（中央切り抜き）", "blur_pad（ぼかし背景で余白追加）"], index=0)
+    crop_mode = "center_crop" if "center_crop" in crop_mode else "blur_pad"
+
+    template = st.selectbox("テンプレ", ["AUTO（おすすめ2候補）", "T1 指し線＋擬音", "T2 下部帯＋キャッチ", "T3 3ポイント", "T4 バッジ＋ミニマル", "T5 小窓（サブ画像）"], index=0)
+
+    st.subheader("③ 推しポイント（任意・最大3つ）")
+    p1 = st.text_input("ポイント1", value="ぷちっと食感、果汁がじゅわっと。")
+    p2 = st.text_input("ポイント2", value="やさしい甘みとほろ苦さのバランス。")
+    p3 = st.text_input("ポイント3", value="そのままでも、料理やジャムにも。")
+
+with col_r:
+    st.subheader("画像アップロード")
+    main_file = st.file_uploader("メイン画像", type=["jpg", "jpeg", "png", "webp"])
+    sub_file = st.file_uploader("サブ画像（T5用・任意）", type=["jpg", "jpeg", "png", "webp"])
+
+    generate = st.button("生成する", type="primary", use_container_width=True)
+
+if not main_file:
+    st.warning("メイン画像をアップロードしてください。")
+    st.stop()
+
+main_img = Image.open(main_file).convert("RGB")
+sub_img = Image.open(sub_file).convert("RGB") if sub_file else None
+
+info = {
+    "product": product,
+    "category": category,
+    "variety": variety,
+    "origin": origin,
+    "producer": producer,
+    "amount": amount,
+    "price": price,
+    "tags": tags,
+    "points": [p1, p2, p3],
+}
+
+sq = fit_square(main_img, 1080, crop_mode)
+copy = generate_copy(info)
+
+def render_templates():
+    results = {}
+
+    # T1
+    t1 = add_pointer_sfx(sq, "プチっ！", "じゅわっ！", target=(720, 470))
+    t1 = add_bottom_band(t1, [f"{origin}  {product}", "やさしいおいしさを食卓へ"])
+    results["T1_pointer_sfx.jpg"] = t1
+
+    # T2
+    t2 = add_bottom_band(sq, [f"{product}" + (f"（{variety}）" if variety else ""), f"{origin} / {producer}"])
+    t2 = add_badge(t2, "旬")
+    results["T2_bottom_band.jpg"] = t2
+
+    # T3
+    t3 = add_three_points(sq, copy["points"])
+    t3 = add_bottom_band(t3, [f"{product}", origin], band_h=180)
+    results["T3_three_points.jpg"] = t3
+
+    # T4
+    t4 = add_badge(sq, "おすすめ")
+    t4 = add_bottom_band(t4, [f"{product}", "やさしい味わい"], band_h=200)
+    results["T4_badge_minimal.jpg"] = t4
+
+    # T5
+    if sub_img:
+        t5 = add_inset(sq, sub_img, label="箱イメージ")
+    else:
+        t5 = add_inset(sq, main_img, label="小窓（サブ未入力）")
+    t5 = add_bottom_band(t5, [f"{origin}  {product}", f"{amount} / {price}"], band_h=220)
+    results["T5_inset.jpg"] = t5
+
+    return results
+
+templates = render_templates()
+
+# AUTO候補（簡易ルール）
+auto_candidates = []
+# 断面/アップっぽい→T1、それ以外は安定のT2
+auto_candidates.append("T1_pointer_sfx.jpg")
+auto_candidates.append("T2_bottom_band.jpg")
+
+st.divider()
+st.subheader("生成結果プレビュー")
+
+# Template selection for preview
+if template.startswith("AUTO"):
+    preview_keys = auto_candidates
+else:
+    key_map = {
+        "T1 指し線＋擬音": "T1_pointer_sfx.jpg",
+        "T2 下部帯＋キャッチ": "T2_bottom_band.jpg",
+        "T3 3ポイント": "T3_three_points.jpg",
+        "T4 バッジ＋ミニマル": "T4_badge_minimal.jpg",
+        "T5 小窓（サブ画像）": "T5_inset.jpg",
+    }
+    preview_keys = [key_map[template]]
+
+cols = st.columns(len(preview_keys))
+for c, k in zip(cols, preview_keys):
+    with c:
+        st.image(templates[k], caption=k, use_container_width=True)
+
+st.subheader("出品用テキスト（コピペ用）")
+st.text_area(
+    "生成テキスト",
+    value=(
+        f"■商品タイトル\n{copy['title']}\n\n"
+        f"■キャッチコピー\n{copy['catch']}\n\n"
+        f"■おすすめポイント\n" + "\n".join([f"・{p}" for p in copy["points"]]) + "\n\n"
+        f"■商品説明\n{copy['desc']}\n\n"
+        f"■注意事項\n{copy['notes']}\n\n"
+        f"■検索キーワード\n{copy['keywords']}\n"
+    ),
+    height=320
+)
+
+# ===== Downloads =====
+def image_to_bytes(img: Image.Image, fmt="JPEG"):
+    buf = io.BytesIO()
+    if fmt.upper() == "PNG":
+        img.save(buf, format="PNG", optimize=True)
+    else:
+        img.save(buf, format="JPEG", quality=92, optimize=True)
+    return buf.getvalue()
+
+fmt = st.radio("画像形式", ["JPG（推奨）", "PNG（文字多い場合）"], horizontal=True)
+fmt = "JPEG" if "JPG" in fmt else "PNG"
+
+# ZIP 만들기
+zip_buf = io.BytesIO()
+with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
+    # preview keysだけでなく全5種を入れる
+    for name, img in templates.items():
+        ext = "jpg" if fmt == "JPEG" else "png"
+        out_name = name.replace(".jpg", f".{ext}")
+        z.writestr(out_name, image_to_bytes(img, fmt))
+    z.writestr(
+        "listing_text.txt",
+        (
+            f"■商品タイトル\n{copy['title']}\n\n"
+            f"■キャッチコピー\n{copy['catch']}\n\n"
+            f"■おすすめポイント\n" + "\n".join([f"・{p}" for p in copy["points"]]) + "\n\n"
+            f"■商品説明\n{copy['desc']}\n\n"
+            f"■注意事項\n{copy['notes']}\n\n"
+            f"■検索キーワード\n{copy['keywords']}\n"
+        ),
+    )
+
+zip_buf.seek(0)
+
+st.download_button(
+    "画像＋テキストをZIPでダウンロード",
+    data=zip_buf.getvalue(),
+    file_name=f"ec_outputs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+    mime="application/zip",
+    use_container_width=True,
+)
